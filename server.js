@@ -1,12 +1,13 @@
 const express = require('express');
-const request = require('request'); // আগের request প্যাকেজটি ব্যবহার করা হচ্ছে
+const axios = require('axios');
 const cors = require('cors');
 const { URL } = require('url');
 
 const app = express();
 app.use(cors());
 
-app.get('/proxy', (req, res) => {
+// app.all ব্যবহার করা হয়েছে যাতে GET, HEAD বা অন্য কোনো মেথডে রিকোয়েস্ট আসলে 405 এরর না দেয়
+app.all('/proxy', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) {
         return res.status(400).send('URL parameter is missing');
@@ -18,34 +19,59 @@ app.get('/proxy', (req, res) => {
         'Accept': '*/*'
     };
 
-    // যদি লিংকটি .m3u8 প্লেলিস্ট হয়, তবে কনটেন্ট মডিফাই করতে হবে
-    if (targetUrl.includes('.m3u8')) {
-        request({ url: targetUrl, headers: headers }, (error, response, body) => {
-            if (error || response.statusCode !== 200) {
-                return res.status(500).send('Error fetching m3u8 playlist');
-            }
-
+    try {
+        // যদি লিংকটি .m3u8 প্লেলিস্ট হয়
+        if (targetUrl.includes('.m3u8')) {
+            const response = await axios.get(targetUrl, { headers });
+            const content = response.data;
             const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-            const updatedContent = body.split('\n').map(line => {
-                line = line.trim();
-                if (line && !line.startsWith('#')) {
-                    let absoluteUrl;
-                    if (line.startsWith('http://') || line.startsWith('https://')) {
-                        absoluteUrl = line;
-                    } else {
-                        absoluteUrl = new URL(line, baseUrl).href;
+
+            const updatedContent = typeof content === 'string' 
+                ? content.split('\n').map(line => {
+                    line = line.trim();
+                    if (line && !line.startsWith('#')) {
+                        let absoluteUrl;
+                        if (line.startsWith('http://') || line.startsWith('https://')) {
+                            absoluteUrl = line;
+                        } else {
+                            absoluteUrl = new URL(line, baseUrl).href;
+                        }
+                        return `${req.protocol}://${req.get('host')}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
                     }
-                    return `${req.protocol}://${req.get('host')}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
-                }
-                return line;
-            }).join('\n');
+                    return line;
+                }).join('\n')
+                : content;
 
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-            res.send(updatedContent);
-        });
-    } else {
-        // .ts ফাইল বা অন্যান্য সেগমেন্ট হলে সরাসরি পাইপ করে পাঠিয়ে দেওয়া হবে
-        req.pipe(request({ url: targetUrl, headers: headers, encoding: null })).pipe(res);
+            return res.send(updatedContent);
+        } else {
+            // .ts বা অন্য মিডিয়া ফাইল হলে সরাসরি স্ট্রিম বা পাইপ করা হবে
+            const response = await axios({
+                method: req.method,
+                url: targetUrl,
+                headers: headers,
+                responseType: 'stream'
+            });
+
+            if (response.headers['content-type']) {
+                res.setHeader('Content-Type', response.headers['content-type']);
+            }
+            if (response.headers['content-length']) {
+                res.setHeader('Content-Length', response.headers['content-length']);
+            }
+            if (response.headers['content-range']) {
+                res.setHeader('Content-Range', response.headers['content-range']);
+            }
+
+            res.status(response.status);
+            response.data.pipe(res);
+        }
+
+    } catch (error) {
+        console.error('Proxy Error:', error.message);
+        if (!res.headersSent) {
+            res.status(500).send('Error fetching stream segment');
+        }
     }
 });
 
