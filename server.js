@@ -6,24 +6,10 @@ const { URL } = require('url');
 const app = express();
 app.use(cors());
 
-app.all('*', async (req, res) => {
+app.all('/proxy', async (req, res) => {
     let targetUrl = req.query.url;
-
-    // যদি সরাসরি /proxy?url= ছাড়া রিকোয়েস্ট আসে (যেমন .ts সেগমেন্ট), তবে Referer দেখে আসল লিংক বের করবে
     if (!targetUrl) {
-        const referer = req.headers['referer'] || req.headers['referrer'];
-        if (referer && referer.includes('url=')) {
-            try {
-                const refererUrlParam = referer.split('url=')[1];
-                const decodedReferer = decodeURIComponent(refererUrlParam);
-                const baseUrl = decodedReferer.substring(0, decodedReferer.lastIndexOf('/') + 1);
-                targetUrl = new URL(req.url, baseUrl).href;
-            } catch (err) {
-                return res.status(400).send('Invalid path URL');
-            }
-        } else {
-            return res.status(400).send('URL parameter is missing');
-        }
+        return res.status(400).send('URL parameter is missing');
     }
 
     const headers = {
@@ -33,7 +19,7 @@ app.all('*', async (req, res) => {
     };
 
     try {
-        if (targetUrl.includes('.m3u8')) {
+        if (targetUrl.includes('.m3u8') || targetUrl.includes('mono.m3u8') || targetUrl.includes('index.m3u8')) {
             const response = await axios.get(targetUrl, { headers, responseType: 'text' });
             let content = response.data;
             const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
@@ -46,6 +32,9 @@ app.all('*', async (req, res) => {
                         let absoluteUrl;
                         if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
                             absoluteUrl = trimmed;
+                        } else if (trimmed.startsWith('/')) {
+                            const parsedOriginal = new URL(targetUrl);
+                            absoluteUrl = `${parsedOriginal.protocol}//${parsedOriginal.host}${trimmed}`;
                         } else {
                             absoluteUrl = new URL(trimmed, baseUrl).href;
                         }
@@ -56,10 +45,10 @@ app.all('*', async (req, res) => {
                 content = updatedLines.join('\n');
             }
 
+            res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
             return res.send(content);
         } else {
-            // .ts ভিডিও সেগমেন্ট স্ট্রিম করার জন্য
             const response = await axios({
                 method: req.method,
                 url: targetUrl,
@@ -69,7 +58,9 @@ app.all('*', async (req, res) => {
 
             if (response.headers['content-type']) res.setHeader('Content-Type', response.headers['content-type']);
             if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
+            if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
 
+            res.setHeader('Access-Control-Allow-Origin', '*');
             res.status(response.status);
             response.data.pipe(res);
         }
